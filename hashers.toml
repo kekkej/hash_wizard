@@ -7,9 +7,11 @@ name = "OpenSSL"
 type = "external"
 command = "openssl"
 args = ["dgst", "-sha256"]
+input_mode = "stdin"
 
 #[[hasher]]
 #name = "Java"
 #type = "external"
 #command = "java"
 #args = ["-jar", "target/javahasher.jar"]
+#input_mode = "arg"
