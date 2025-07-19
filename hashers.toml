@@ -1,0 +1,15 @@
+[[hasher]]
+name = "Rust"
+type = "builtin"
+
+[[hasher]]
+name = "OpenSSL"
+type = "external"
+command = "openssl"
+args = ["dgst", "-sha256"]
+
+#[[hasher]]
+#name = "Java"
+#type = "external"
+#command = "java"
+#args = ["-jar", "target/javahasher.jar"]
