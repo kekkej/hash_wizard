@@ -1,131 +1,168 @@
-mod hashers;
 mod config;
+mod hashers;
+mod db;
+mod formatter;
 
-use std::string::String;
-use clap::Parser;
-use crate::config::load_hashers_from_config;
-use crate::hashers::{Hasher, RustSha256Hasher};
+use clap::{Parser, Subcommand};
+use anyhow::{Result, Context};
+use db::{init_db, issue_key, rotate_key, list_keys, get_active_key};
+use hashers::{Hasher};
+use config::load_hashers_from_config;
 
-
+/// CLI interface
 #[derive(Parser)]
-#[command(name = "KeyGen CLI", version = "1.0", author = "Ты")]
+#[command(name = "keygen", version = "2.0")]
 struct Args {
-    #[arg(short, long)]
-    user: String,
+    #[command(subcommand)]
+    command: Command,
 
-    /// console, sql, vault
-    #[arg(short, long, default_value = "console")]
-    output: String,
-
-    #[arg(long, default_value = "users")]
-    table: String,
-
-    #[arg(long)]
-    check: bool,
+    #[arg(long, default_value = "keygen.db")]
+    db: String,
 
     #[arg(long, default_value = "hashers.toml")]
     config: String,
 }
 
-fn main() {
-    let args = Args::parse();
+#[derive(Subcommand)]
+enum Command {
+    /// Issue new key (error if exists)
+    Issue { user: String },
 
-    let hashers = load_hashers_from_config(&args.config);
-    let key = generate_key();
+    /// Rotate (replace) key for user
+    Rotate { user: String },
 
-    println!("🔐 Generated key for '{}'", args.user);
+    /// Verify active key consistency across all hashers
+    Check { user: String },
 
-    let results = run_hashers(&hashers, &key);
-    let res = RustSha256Hasher.hash(&key);
-    match res {
-        Ok(v) => {println!("result = {}", v);}
-        Err(_) => {println!("error")}
+    /// Display key journal (with hashes)
+    Journal {
+        #[arg(long)]
+        show_all: bool,
+
+        #[arg(long)]
+        output: Option<String>,
     }
-
-    if args.check {
-        compare_hashes(&results);
-    }
-    
-    handle_output(&args.output, &args.user, &key, &args.table);
 }
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+    let conn = init_db(&args.db)?;
+    let hashers = load_hashers_from_config(&args.config);
+    
+    if hashers.is_empty() { 
+        println!("Nothing to do");
+        return Ok(());
+    }
+
+    let primary_hasher = &hashers[0];
+
+    match args.command {
+        Command::Issue { user } => {
+            let key = generate_key();
+            
+            let key_hash = primary_hasher.hash(&key)
+                .with_context(|| "Failed to hash generated key")?;
+            
+            compare_hashes(&key, &key_hash, &hashers)
+                .with_context(|| "Hash inconsistency detected during key issuance")?;
+            
+            let id = issue_key(&conn, &user, &key, &key_hash)?;
+            println!("✅ Key issued for '{}'", user);
+            println!("ID: {}", id);
+        }
+
+        Command::Rotate { user } => {
+            let new_key = generate_key();
+            
+            let key_hash = primary_hasher.hash(&new_key)
+                .with_context(|| "Failed to hash new key")?;
+            
+            compare_hashes(&new_key, &key_hash, &hashers)
+                .with_context(|| "Hash inconsistency detected during key issuance")?;
+            
+            let id = rotate_key(&conn, &user, &new_key, &key_hash)?;
+            println!("🔄 Key rotated for '{}'", user);
+            println!("New ID: {}", id);
+        }
+
+        Command::Check { user } => {
+            let key = get_active_key(&conn, &user)
+                .with_context(|| format!("No active key found for '{}'", user))?;
+
+            println!("🔍 Checking key for '{}'", user);
+
+            let mut reference: Option<String> = None;
+            let mut all_match = true;
+
+            for hasher in &hashers {
+                let hash = hasher.hash(&key)
+                    .with_context(|| format!("Hasher '{}' failed", hasher.name()))?;
+
+                if let Some(ref ref_hash) = reference {
+                    if !hash.eq_ignore_ascii_case(ref_hash) {
+                        all_match = false;
+                    }
+                } else {
+                    reference = Some(hash.clone());
+                }
+
+                println!("{:<12}: {}", hasher.name(), hash);
+            }
+
+            if all_match {
+                println!("✅ All hashers produced identical hashes.");
+            } else {
+                println!("❌ Hash mismatch detected!");
+                std::process::exit(1);
+            }
+        }
+
+        Command::Journal { show_all, output } => {
+            let entries = list_keys(&conn, show_all)?;
+            let mut buffer = Vec::new();
+            formatter::render_journal_table(&entries, &mut buffer)?;
+            
+            if let Some(path) = output {
+                std::fs::write(&path, buffer)
+                    .with_context(|| format!("Failed to write journal to '{}'", path))?;
+                println!("✅ Journal written to '{}'", path);
+            } else {
+                print!("{}", String::from_utf8_lossy(&buffer));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 
 fn generate_key() -> String {
     // String::from("qhyBDKoRjfpJuu4z1g5nSW6I9yFhav1isA0FrTKj8LQCLUGawg0ZGoT7sG5AUiVx")
     use rand::RngCore;
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-fn run_hashers<'a>(
-    hashers: &'a [Box<dyn Hasher + 'a>],
-    input: &str
-) -> Vec<(&'a str, Result<String, String>)> {
-    hashers
-        .iter()
-        .map(|h| (h.name(), h.hash(input)))
-        .collect()
-}
 
-fn compare_hashes(results: &[(&str, Result<String, String>)]) {
-    println!("🧪 Comparing hashes:\n");
+pub fn compare_hashes<'a>(
+    input: &str,
+    canonical_hash: &str,
+    hashers: &[Box<dyn Hasher + 'a>],
+) -> Result<()> {
+    for hasher in hashers {
+        let hash = hasher.hash(input)
+            .with_context(|| format!("Hasher '{}' failed", hasher.name()))?;
 
-    let reference = results.iter()
-        .find_map(|(name, res)| res.as_ref().ok().map(|hash| (hash, *name)));
-
-    if let Some((ref_hash, _ref_name)) = reference {
-        for (name, result) in results {
-            match result {
-                Ok(hash) => {
-                    let status = if hash.eq_ignore_ascii_case(ref_hash) { "✅" } else { "❌" };
-                    println!("{:<10}: {} {}", name, hash, status);
-                }
-                Err(e) => {
-                    println!("{:<10}: ❌ ERROR: {}", name, e);
-                }
-            }
-        }
-    } else {
-        println!("❌ No valid hash to compare with");
-    }
-}
-
-fn handle_output(mode: &str, user: &str, key: &str, table: &str) {
-    match mode {
-        "console" => {
-            println!("👤 User: {}", user);
-            println!("🔑 Key: {}", key);
-        }
-
-        "sql" => {
-            println!(
-                "📄 SQL:\nINSERT INTO {} (name, key, is_active) VALUES ('{}', '{}', true);",
-                table, user, key
+        if !hash.eq_ignore_ascii_case(canonical_hash) {
+            anyhow::bail!(
+                "Hasher '{}' mismatch: expected {}, got {}",
+                hasher.name(),
+                canonical_hash,
+                hash
             );
         }
-
-        "vault" => {
-            if let Err(e) = try_write_to_vault(user, key) {
-                eprintln!("❌ Vault error: {}", e);
-                println!("🔑 Key: {}", key);
-            } else {
-                println!("✅ Key written to vault for user '{}'", user);
-            }
-        }
-
-        _ => {
-            eprintln!("❌ Unknown output mode: {}", mode);
-        }
-    }
-}
-
-
-fn try_write_to_vault(user: &str, key: &str) -> Result<(), String> {
-
-    if user.contains("fail") {
-        return Err("vault failure".into());
     }
 
-    println!("Writing to vault: user={}, key={}", user, key);
     Ok(())
 }

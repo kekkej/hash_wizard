@@ -29,7 +29,8 @@ pub fn load_hashers_from_config(path: &str) -> Vec<Box<dyn Hasher>> {
     let content = std::fs::read_to_string(path)
         .expect(format!("Failed to read config in {}", path)
             .as_str());
-    let config: HasherConfigFile = toml::from_str(&content).expect("Failed to parse TOML");
+    let config: HasherConfigFile = toml::from_str(&content)
+        .expect("Failed to parse TOML");
 
     config
         .hasher

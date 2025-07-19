@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 use serde::{Deserialize, Deserializer};
+use anyhow::{Context, Result};
 use crate::config::InputMode;
 
 #[derive(Debug, Clone, Copy)]
@@ -42,15 +43,6 @@ impl HashAlgorithm {
         }
     }
 
-    // pub fn hex_length(&self) -> usize {
-    //     match self {
-    //         HashAlgorithm::Sha256 => 64,
-    //         HashAlgorithm::Sha1 => 40,
-    //         HashAlgorithm::Sha512 => 128,
-    //         HashAlgorithm::Md5 => 32,
-    //     }
-    // }
-
     pub fn regex(&self) -> regex::Regex {
         let pattern = match self {
             HashAlgorithm::Sha256 => r"(?i)\b[a-f0-9]{64}\b",
@@ -66,7 +58,7 @@ impl HashAlgorithm {
 
 pub trait Hasher {
     fn name(&self) -> &str;
-    fn hash(&self, input: &str) -> Result<String, String>;
+    fn hash(&self, input: &str) -> Result<String>;
 }
 
 pub struct RustSha256Hasher;
@@ -76,7 +68,7 @@ impl Hasher for RustSha256Hasher {
         "Rust"
     }
 
-    fn hash(&self, input: &str) -> Result<String, String> {
+    fn hash(&self, input: &str) -> Result<String> {
         use sha2::{Sha256, Digest};
         let mut hasher = Sha256::new();
         hasher.update(input.as_bytes());
@@ -96,7 +88,7 @@ impl Hasher for ExternalHasher {
         &self.name
     }
 
-    fn hash(&self, input: &str) -> Result<String, String> {
+    fn hash(&self, input: &str) -> Result<String> {
         let algorithm = self.algorithm;
         match self.input_mode {
             InputMode::Arg => {
@@ -104,7 +96,7 @@ impl Hasher for ExternalHasher {
                     .args(&self.args)
                     .arg(input)
                     .output()
-                    .map_err(|e| e.to_string())?;
+                    .with_context(|| format!("Failed to run '{}'", self.command))?;
 
                 process_output_with_algorithm(output, algorithm)
             }
@@ -115,14 +107,17 @@ impl Hasher for ExternalHasher {
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .spawn()
-                    .map_err(|e| e.to_string())?;
+                    .with_context(|| format!("Failed to spawn '{}'", self.command))?;
 
-                {
-                    let stdin = process.stdin.as_mut().ok_or("No stdin")?;
-                    stdin.write_all(input.as_bytes()).map_err(|e| e.to_string())?;
-                }
+                process.stdin.as_mut()
+                    .context("Failed to open stdin")?
+                    .write_all(input.as_bytes())
+                    .context("Failed to write to stdin")?;
 
-                let output = process.wait_with_output().map_err(|e| e.to_string())?;
+                let output = process
+                    .wait_with_output()
+                    .context("Failed to read process output")?;
+                
                 process_output_with_algorithm(output, algorithm)
             }
 
@@ -130,9 +125,14 @@ impl Hasher for ExternalHasher {
                 use std::io::Write;
                 use tempfile::NamedTempFile;
 
-                let mut temp = NamedTempFile::new().map_err(|e| e.to_string())?;
-                write!(temp, "{}", input).map_err(|e| e.to_string())?;
-                let path = temp.path().to_str().ok_or("Invalid temp path")?;
+                let mut temp = NamedTempFile::new()
+                    .context("Failed to create temporary file")?;
+
+                write!(temp, "{}", input)
+                    .context("Failed to write input to temporary file")?;
+
+                let path = temp.path().to_str()
+                    .context("Failed to get temporary file path")?;
 
                 let substituted_args: Vec<String> = self
                     .args
@@ -143,7 +143,7 @@ impl Hasher for ExternalHasher {
                 let output = Command::new(&self.command)
                     .args(&substituted_args)
                     .output()
-                    .map_err(|e| e.to_string())?;
+                    .with_context(|| format!("Failed to run '{}'", self.command))?;
 
                 process_output_with_algorithm(output, algorithm)
             }
@@ -155,9 +155,10 @@ impl Hasher for ExternalHasher {
 fn process_output_with_algorithm(
     output: std::process::Output,
     algorithm: HashAlgorithm,
-) -> Result<String, String> {
+) -> Result<String> {
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        let unsuccess_error = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(anyhow::anyhow!(unsuccess_error));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -165,6 +166,6 @@ fn process_output_with_algorithm(
     if let Some(mat) = re.find(&stdout) {
         Ok(mat.as_str().to_string())
     } else {
-        Err(format!("No valid {} hash found in output", algorithm.name()))
+        Err(anyhow::anyhow!("No valid {} hash found in output", algorithm.name()))
     }
 }
