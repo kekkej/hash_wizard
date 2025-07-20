@@ -4,6 +4,7 @@ mod db;
 mod formatter;
 mod crypto;
 mod macros;
+mod output;
 
 use clap::{Parser, Subcommand};
 use anyhow::{Result, Context};
@@ -39,6 +40,8 @@ enum Command {
         show_all: bool,
         #[arg(long)]
         output: Option<String>,
+        #[arg(long, default_value = "console")]
+        format: formatter::Formatter,
     }
 }
 
@@ -147,18 +150,21 @@ fn main() -> Result<()> {
             }
         }
 
-        Command::Journal { show_all, output } => {
-            let entries = list_keys(&conn, show_all,  &master_key_bytes)?;
-            let mut buffer = Vec::new();
-            formatter::render_journal_table(&entries, &mut buffer)?;
+        Command::Journal { show_all, output, format } => {
+            let entries = list_keys(&conn, show_all, &master_key_bytes)?;
 
-            if let Some(path) = output {
-                std::fs::write(&path, buffer)
-                    .with_context(|| format!("Failed to write journal to '{}'", path))?;
-                println!("✅ Journal written to '{}'", path);
-            } else {
-                print!("{}", String::from_utf8_lossy(&buffer));
-            }
+            let rendered = format.render(&entries);
+
+            let output_target = match output {
+                Some(path) => output::OutputTarget::File(path),
+                None => output::OutputTarget::Console,
+            };
+
+            let controller = output::OutputController {
+                target: output_target,
+            };
+
+            controller.output(&rendered)?;
         }
     }
 
