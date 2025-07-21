@@ -20,8 +20,8 @@ impl Formatter {
 
 fn render_as_table(keys: &[IssuedKey]) -> String {
     let mut out = String::new();
-    out.push_str("ID | User | Hash | Active | Created At\n");
-    out.push_str("---|------|------|--------|------------\n");
+    out.push_str("ID | User | Key | Hash | Active | Created At\n");
+    out.push_str("---|------|-----|------|--------|------------\n");
     for key_entry in keys {
         out.push_str(&format!(
             "{} | {} | {} | {} | {} | {}\n",
