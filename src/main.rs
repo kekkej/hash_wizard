@@ -58,6 +58,7 @@ fn main() -> Result<()> {
         crypto::save_master_key(&MASTER_KEY_FILE, &master_key)?;
         println!("✅ Storage initialized.");
         println!("Master key created");
+        return Ok(());
     } else {
         require_files!(
             exists, 
