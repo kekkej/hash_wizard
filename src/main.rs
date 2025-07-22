@@ -9,7 +9,7 @@ mod output;
 use clap::{Parser, Subcommand};
 use anyhow::{Result, Context};
 use rand_core::RngCore;
-use db::{init_db, issue_key, rotate_key, list_keys, get_active_key};
+use db::{init_db, issue_key, rotate_key, list_keys, get_active_key, revoke_key};
 use hashers::{Hasher};
 use config::load_hashers_from_config;
 use crate::Command::InitStorage;
@@ -35,6 +35,7 @@ enum Command {
     Issue { user: String },
     Rotate { user: String },
     Check { user: String },
+    Revoke { id: String },
     Journal {
         #[arg(long)]
         show_all: bool,
@@ -118,7 +119,10 @@ fn main() -> Result<()> {
             println!("🔄 Key rotated for '{}'", user);
             println!("New ID: {}", id);
         }
-
+        Command::Revoke { id } => {
+            revoke_key(&id, &conn);
+            println!("🗑️ Revoke key by id'{}'", id);
+        }
         Command::Check { user } => {
             let key = get_active_key(&conn, &user,  &master_key_bytes)
                 .with_context(|| format!("No active key found for '{}'", user))?;
@@ -154,7 +158,7 @@ fn main() -> Result<()> {
         Command::Journal { show_all, output, format } => {
             let entries = list_keys(&conn, show_all, &master_key_bytes)?;
 
-            let rendered = format.render(&entries);
+            let rendered = format.render(&entries, !show_all);
 
             let output_target = match output {
                 Some(path) => output::OutputTarget::File(path),

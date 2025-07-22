@@ -1,8 +1,9 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use anyhow::{Result, Context};
 use chrono::Utc;
-use crate::crypto;
 use crate::crypto::{decrypt, encrypt};
+
+const REVOKE_ID: i64 = -111;
 
 #[derive(Debug)]
 pub struct IssuedKey {
@@ -11,7 +12,7 @@ pub struct IssuedKey {
     pub key: String,
     pub key_hash: String,
     pub active: bool,
-    pub replaced_by: Option<i64>,
+    pub reason: String,
     pub created_at: String,
 }
 
@@ -116,7 +117,7 @@ pub fn list_keys(conn: &Connection, show_all: bool, master_key: &[u8]) -> Result
             key: decrypted_key,
             key_hash: row.get(3)?,
             active: row.get(4)?,
-            replaced_by: row.get(5)?,
+            reason: get_inactive_reason(row.get(5)?),
             created_at: formatted_date(&row.get(6)?),
         })
     }).context("Failed to map journal rows")?;
@@ -126,6 +127,20 @@ pub fn list_keys(conn: &Connection, show_all: bool, master_key: &[u8]) -> Result
         results.push(row.context("Failed to read journal row")?);
     }
     Ok(results)
+}
+
+fn get_inactive_reason(replace_code: Option<i64>) -> String {
+    match replace_code {
+        Some(id) if id == REVOKE_ID => "revoked".to_string(),
+        Some(id) => format!("replaced by {}", id),
+        None => String::new(),
+    }
+}
+
+pub fn revoke_key(id: &String, conn: &Connection) {
+    let sql = "UPDATE issued_keys SET active = 0, replaced_by = ?1 WHERE id = ?2;";
+    let _ = conn.execute(sql, params![REVOKE_ID, id])
+        .context("Failed to revoke key");
 }
 
 fn decrypt_row(row: &rusqlite::Row, idx: usize, master_key: &[u8]) -> Result<String> {
